@@ -134,18 +134,21 @@ def _filename_from_headers(headers, url: str) -> str:
     return sanitize_filename(name) if name else "download"
 
 
-def _open(url, start=None, end=None, timeout=30):
+def _open(url, start=None, end=None, timeout=30, extra=None):
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*",
                "Accept-Encoding": "identity"}
+    for k, v in (extra or {}).items():
+        if v:
+            headers[k] = v
     if start is not None:
         headers["Range"] = f"bytes={start}-" + ("" if end is None else str(end))
     req = urllib.request.Request(url, headers=headers)
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def probe(url: str, timeout=20) -> dict:
+def probe(url: str, timeout=20, headers=None) -> dict:
     """Find size, filename, and whether the server supports ranges."""
-    resp = _open(url, 0, None, timeout)
+    resp = _open(url, 0, None, timeout, headers)
     try:
         code = resp.status
         final_url = resp.geturl()
@@ -211,6 +214,7 @@ class Download:
         self.last_try = None
         self.completed_at = None
         self.description = ""
+        self.headers: dict[str, str] = {}   # Cookie / Referer / User-Agent from browser
         self.speed = 0.0
         self.active_conns = 0
         self.conn_info: dict[int, str] = {}
@@ -261,6 +265,7 @@ class Download:
                 "error": self.error, "added": self.added,
                 "last_try": self.last_try, "completed_at": self.completed_at,
                 "description": self.description,
+                "headers": self.headers,
             }
 
     @classmethod
@@ -276,6 +281,7 @@ class Download:
         o.last_try = d.get("last_try")
         o.completed_at = d.get("completed_at")
         o.description = d.get("description", "")
+        o.headers = d.get("headers", {}) or {}
         return o
 
 
@@ -322,7 +328,7 @@ class Job(threading.Thread):
 
     def _fresh_start(self):
         d = self.d
-        info = probe(d.url)
+        info = probe(d.url, headers=d.headers)
         d.size = info["size"]
         d.resumable = info["resumable"]
         if not d.filename:
@@ -410,7 +416,7 @@ class Job(threading.Thread):
                 continue
             try:
                 d.conn_info[idx] = "Connecting…"
-                resp = _open(d.url, start, end)
+                resp = _open(d.url, start, end, extra=d.headers)
                 if resp.status != 206:
                     resp.close()
                     raise IOError(f"Server ignored range request (HTTP {resp.status})")
@@ -461,7 +467,7 @@ class Job(threading.Thread):
     def _single_worker(self):
         d = self.d
         try:
-            resp = _open(d.url)
+            resp = _open(d.url, extra=d.headers)
             d.conn_info[0] = "Receiving data (server does not support resume)…"
             d.active_conns = 1
             d._dl_single = 0
@@ -530,6 +536,8 @@ DEFAULT_SETTINGS = {
     "monitor_clipboard": True,
     "show_progress_dialog": True,
     "show_complete_dialog": True,
+    "browser_integration": True,
+    "browser_show_dialog": True,
 }
 
 
@@ -593,12 +601,13 @@ class DownloadManager:
 
     # ---- operations
     def add(self, url, filename=None, save_dir=None, start=True,
-            connections=None, info=None, description=""):
+            connections=None, info=None, description="", headers=None):
         if not save_dir:
             save_dir = self.dir_for(filename) if filename else ""   # "" = decide after probe
         d = Download(url, save_dir, filename,
                      connections or int(self.settings["connections"]))
         d.description = description
+        d.headers = dict(headers or {})
         if info:
             d.size = info.get("size", -1)
             d.resumable = info.get("resumable", False)

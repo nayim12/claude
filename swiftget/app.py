@@ -10,6 +10,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import bridge
 import engine
 from engine import (ACTIVE_STATES, COMPLETE, ERROR, PAUSED, QUEUED,
                     human_size, human_speed, human_time)
@@ -136,11 +137,13 @@ class AddUrlDialog(tk.Toplevel):
 class FileInfoDialog(tk.Toplevel):
     """Step 2: show file info, choose where to save, start or queue."""
 
-    def __init__(self, app, url, description=""):
+    def __init__(self, app, url, description="", headers=None, filename="", size=-1):
         super().__init__(app.root)
         self.app = app
         self.url = url
         self.description = description
+        self.headers = headers or {}
+        self.suggested = engine.sanitize_filename(filename) if filename else ""
         self.info = None
         self.title("Download File Info")
         self.resizable(False, False)
@@ -185,8 +188,12 @@ class FileInfoDialog(tk.Toplevel):
         center(self, app.root)
         self.grab_set()
 
-        self._filename = os.path.basename(url.split("?")[0]) or "download"
+        self._filename = self.suggested or os.path.basename(url.split("?")[0]) or "download"
         self._set_name(self._filename)
+        if size and size > 0:
+            self.size_lbl.config(text=f"Size: {human_size(size)}")
+        if self.headers:
+            self.res_lbl.config(text="Captured from browser - checking resume capability…")
         threading.Thread(target=self._probe, daemon=True).start()
 
     def _set_name(self, name):
@@ -203,7 +210,7 @@ class FileInfoDialog(tk.Toplevel):
 
     def _probe(self):
         try:
-            info = engine.probe(self.url)
+            info = engine.probe(self.url, headers=self.headers)
         except Exception as e:  # noqa: BLE001
             info = {"error": engine._err_text(e)}
         try:
@@ -219,7 +226,7 @@ class FileInfoDialog(tk.Toplevel):
                                  foreground="#cf222e")
             return
         self.info = info
-        self._set_name(info["filename"])
+        self._set_name(self.suggested or info["filename"])
         self.size_lbl.config(text=f"Size: {human_size(info['size'])}")
         self.res_lbl.config(text="Resume capability: " + (
             "Yes - multi-connection download" if info["resumable"] else
@@ -238,7 +245,8 @@ class FileInfoDialog(tk.Toplevel):
             messagebox.showwarning(APP_NAME, "Please choose a file name.", parent=self)
             return
         d = self.app.mgr.add(self.url, filename=name, save_dir=os.path.dirname(p),
-                             start=start, info=self.info, description=self.description)
+                             start=start, info=self.info, description=self.description,
+                             headers=self.headers)
         self.destroy()
         self.app.refresh(force=True)
         if start and self.app.mgr.settings.get("show_progress_dialog"):
@@ -451,6 +459,19 @@ class OptionsDialog(tk.Toplevel):
         ttk.Spinbox(c, from_=0, to=10_000_000, increment=100, textvariable=self.limit,
                     width=10).grid(row=2, column=1, sticky="w")
 
+        # --- Browser
+        b = ttk.Frame(nb, padding=12)
+        nb.add(b, text="Browser")
+        self.bint = tk.BooleanVar(value=s.get("browser_integration", True))
+        ttk.Checkbutton(b, text="Take over downloads from the browser extension",
+                        variable=self.bint).pack(anchor="w", pady=2)
+        self.bdlg = tk.BooleanVar(value=s.get("browser_show_dialog", True))
+        ttk.Checkbutton(b, text="Show the “Download File Info” window for browser downloads\n"
+                               "(untick to start them immediately)",
+                        variable=self.bdlg).pack(anchor="w", pady=2)
+        ttk.Button(b, text="Install browser extension…",
+                   command=lambda: BrowserSetupDialog(app)).pack(anchor="w", pady=(10, 0))
+
         bf = ttk.Frame(self, padding=(8, 0, 8, 8))
         bf.pack(fill="x")
         ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="right")
@@ -472,7 +493,9 @@ class OptionsDialog(tk.Toplevel):
                      max_active=max(1, int(self.active.get())),
                      speed_limit_kb=max(0, int(self.limit.get())),
                      monitor_clipboard=self.clip.get(), show_progress_dialog=self.prog.get(),
-                     show_complete_dialog=self.comp.get())
+                     show_complete_dialog=self.comp.get(),
+                     browser_integration=self.bint.get(),
+                     browser_show_dialog=self.bdlg.get())
         except (tk.TclError, ValueError):
             messagebox.showwarning(APP_NAME, "Please enter valid numbers.", parent=self)
             return
@@ -508,6 +531,164 @@ class CompleteDialog(tk.Toplevel):
 
 
 # ===================================================================
+class BatchDialog(tk.Toplevel):
+    """Pick which of the links sent from the browser to download."""
+
+    def __init__(self, app, items, headers):
+        super().__init__(app.root)
+        self.app = app
+        self.items = items
+        self.headers = headers
+        self.title(f"SwiftGet - {len(items)} links from browser")
+        self.geometry("760x460")
+        self.transient(app.root)
+        set_icon(self)
+        f = ttk.Frame(self, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Select the files to download (click a row to tick / untick):").pack(
+            anchor="w", pady=(0, 6))
+        tf = ttk.Frame(f)
+        tf.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tf, columns=("on", "name", "type", "url"), show="headings")
+        for c, t, w in (("on", "✔", 34), ("name", "File name", 230), ("type", "Type", 90),
+                        ("url", "Address", 360)):
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="center" if c == "on" else "w",
+                             stretch=c in ("name", "url"))
+        vs = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vs.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+        self.checked = set()
+        for i, it in enumerate(items):
+            name = it.get("filename") or engine.sanitize_filename(
+                os.path.basename(it["url"].split("?")[0])) or it["url"]
+            it["_name"] = name
+            self.tree.insert("", "end", iid=str(i),
+                             values=("☑", name, engine.category_for(name), it["url"]))
+            self.checked.add(str(i))
+        self.tree.bind("<Button-1>", self._toggle)
+        self.tree.bind("<space>", self._toggle)
+
+        bf = ttk.Frame(f)
+        bf.pack(fill="x", pady=(10, 0))
+        ttk.Button(bf, text="Check all", command=lambda: self._all(True)).pack(side="left")
+        ttk.Button(bf, text="Uncheck all", command=lambda: self._all(False)).pack(side="left",
+                                                                                padx=6)
+        ttk.Button(bf, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bf, text="Add paused", command=lambda: self.go(False)).pack(side="right",
+                                                                              padx=6)
+        ttk.Button(bf, text="Download", style="Accent.TButton",
+                   command=lambda: self.go(True)).pack(side="right")
+        center(self, app.root)
+        self.grab_set()
+
+    def _toggle(self, e):
+        iid = self.tree.identify_row(e.y) if e.type == tk.EventType.ButtonPress else \
+            self.tree.focus()
+        if not iid:
+            return
+        if iid in self.checked:
+            self.checked.discard(iid)
+            self.tree.set(iid, "on", "☐")
+        else:
+            self.checked.add(iid)
+            self.tree.set(iid, "on", "☑")
+
+    def _all(self, on):
+        for iid in self.tree.get_children():
+            if on:
+                self.checked.add(iid)
+            else:
+                self.checked.discard(iid)
+            self.tree.set(iid, "on", "☑" if on else "☐")
+
+    def go(self, start):
+        for iid in sorted(self.checked, key=int):
+            it = self.items[int(iid)]
+            self.app.mgr.add(it["url"], filename=it.get("filename") or None, start=start,
+                             headers=self.headers, description=it.get("text", "")[:120])
+        self.destroy()
+        self.app.refresh(force=True)
+
+
+# ===================================================================
+class BrowserSetupDialog(tk.Toplevel):
+    """Explains and installs the browser extension."""
+
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.title("Browser integration")
+        self.resizable(False, False)
+        self.transient(app.root)
+        set_icon(self)
+        f = ttk.Frame(self, padding=16)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Browser integration", font=("Segoe UI", 12, "bold"),
+                  foreground=ACCENT).pack(anchor="w")
+        ok = app.bridge.server is not None
+        ttk.Label(f, text=("● SwiftGet is listening for the browser extension on "
+                           f"127.0.0.1:{bridge.PORT}") if ok else
+                  f"● Not listening: {app.bridge.error}",
+                  foreground="#2da44e" if ok else "#cf222e").pack(anchor="w", pady=(4, 10))
+        steps = (
+            "Install the SwiftGet extension once in Chrome, Edge, Brave, Opera or Vivaldi:\n\n"
+            "  1.  Click “Copy extension folder” below. A folder window opens.\n"
+            "  2.  Open your browser's extensions page (buttons below), or type\n"
+            "       chrome://extensions  /  edge://extensions  in the address bar.\n"
+            "  3.  Turn on “Developer mode” (top-right in Chrome, left side in Edge).\n"
+            "  4.  Click “Load unpacked” and choose the folder that opened in step 1.\n\n"
+            "After that, file downloads in the browser go to SwiftGet automatically.\n"
+            "Right-click a link or video and choose “Download with SwiftGet”, or use\n"
+            "the extension's toolbar button to grab every link on a page.\n\n"
+            "If SwiftGet is closed, the browser downloads the file normally.")
+        ttk.Label(f, text=steps, justify="left").pack(anchor="w")
+        bf = ttk.Frame(f)
+        bf.pack(fill="x", pady=(14, 0))
+        ttk.Button(bf, text="Copy extension folder", style="Accent.TButton",
+                   command=self.export).pack(side="left")
+        ttk.Button(bf, text="Open Chrome extensions",
+                   command=lambda: self.open_browser("chrome", "chrome://extensions")).pack(
+            side="left", padx=6)
+        ttk.Button(bf, text="Open Edge extensions",
+                   command=lambda: self.open_browser("msedge", "edge://extensions")).pack(
+            side="left")
+        ttk.Button(bf, text="Close", command=self.destroy).pack(side="right")
+        center(self, app.root)
+
+    def export(self):
+        import shutil
+        src = resource("browser-extension")
+        if not os.path.isdir(src):  # running from source checkout
+            src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "extension")
+        dst = os.path.join(data_dir(), "browser-extension")
+        try:
+            shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("dist", "*.py"))
+        except OSError as e:
+            messagebox.showerror(APP_NAME, f"Could not copy the extension:\n{e}", parent=self)
+            return
+        self.clipboard_clear()
+        self.clipboard_append(dst)
+        self.app._last_clip = dst
+        open_path(dst)
+        messagebox.showinfo(APP_NAME, f"Extension folder ready (path copied to clipboard):\n\n"
+                                      f"{dst}\n\nNow choose this folder with “Load unpacked”.",
+                            parent=self)
+
+    def open_browser(self, exe, url):
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["cmd", "/c", "start", "", exe, url],
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            else:
+                subprocess.Popen([{"msedge": "microsoft-edge"}.get(exe, "google-chrome"), url])
+        except OSError:
+            messagebox.showinfo(APP_NAME, f"Open your browser and go to:\n{url}", parent=self)
+
+
+# ===================================================================
 class App:
     COLS = (("name", "File Name", 300), ("size", "Size", 90), ("status", "Status", 110),
             ("eta", "Time left", 80), ("rate", "Transfer rate", 100),
@@ -520,6 +701,9 @@ class App:
         self.root.minsize(760, 400)
         set_icon(self.root)
         self.mgr = engine.DownloadManager(data_dir())
+        self.bridge = bridge.Bridge(VERSION, lambda: self.mgr.settings.get(
+            "browser_integration", True))
+        self.bridge.start()
         self.progress_windows: dict[str, ProgressDialog] = {}
         self.filter = "All Downloads"
         self.sort_col, self.sort_rev = None, False
@@ -556,6 +740,8 @@ class App:
         tasks = tk.Menu(m, tearoff=0)
         tasks.add_command(label="Add new download…", accelerator="Ctrl+N", command=self.add_url)
         tasks.add_command(label="Add batch download from clipboard…", command=self.add_batch)
+        tasks.add_command(label="Browser integration…",
+                          command=lambda: BrowserSetupDialog(self))
         tasks.add_separator()
         tasks.add_command(label="Exit", command=self.quit)
         m.add_cascade(label="Tasks", menu=tasks)
@@ -600,6 +786,7 @@ class App:
             ("✕", "Delete", self.delete, "#57606a"),
             ("✔", "Delete Completed", self.delete_completed, "#57606a"),
             ("⚙", "Options", lambda: OptionsDialog(self), "#57606a"),
+            ("🌐", "Browser", lambda: BrowserSetupDialog(self), "#0598bc"),
             ("⏵⏵", "Start Queue", lambda: self._set_queue(True), "#0598bc"),
             ("⏸", "Stop Queue", lambda: self._set_queue(False), "#8250df"),
         ]
@@ -751,7 +938,10 @@ class App:
             f"  {len(self.mgr.downloads)} downloads   •   {len(active)} active   •   "
             f"{human_speed(total_speed) or '0 B/s'}"
             + (f"   •   limit {lim} KB/s" if lim else "")
-            + ("" if self.mgr.queue_running else "   •   queue stopped"))
+            + ("" if self.mgr.queue_running else "   •   queue stopped")
+            + ("   •   browser: " + ("connected" if self.bridge.server and
+                                     self.mgr.settings.get("browser_integration", True)
+                                     else "off")))
 
     @staticmethod
     def _tag(d):
@@ -771,8 +961,40 @@ class App:
                 if self.mgr.settings.get("show_complete_dialog"):
                     CompleteDialog(self, d)
             self._check_clipboard()
+            self._browser_events()
         finally:
             self.root.after(500, self._tick)
+
+    # ---------------------------------------------------------- browser
+    def bring_to_front(self):
+        r = self.root
+        r.deiconify()
+        r.lift()
+        r.attributes("-topmost", True)
+        r.after(300, lambda: r.attributes("-topmost", False))
+        r.focus_force()
+
+    def _browser_events(self):
+        # one event per tick, and never while another modal dialog is open
+        if self._modal_open() or self.bridge.events.empty():
+            return
+        kind, data = self.bridge.events.get_nowait()
+        if kind == "show":
+            self.bring_to_front()
+        elif kind == "add":
+            if self.mgr.settings.get("browser_show_dialog", True):
+                self.bring_to_front()
+                FileInfoDialog(self, data["url"], headers=data["headers"],
+                               filename=data["filename"], size=data["size"])
+            else:
+                d = self.mgr.add(data["url"], filename=data["filename"] or None,
+                                 headers=data["headers"])
+                self.refresh(force=True)
+                if self.mgr.settings.get("show_progress_dialog"):
+                    self.show_progress(d)
+        elif kind == "batch":
+            self.bring_to_front()
+            BatchDialog(self, data["items"], data["headers"])
 
     # ---------------------------------------------------------- clipboard
     def _init_clip(self):
@@ -798,7 +1020,7 @@ class App:
                 FileInfoDialog(self, t.strip())
 
     def _modal_open(self):
-        return any(isinstance(w, (FileInfoDialog, AddUrlDialog, OptionsDialog))
+        return any(isinstance(w, (FileInfoDialog, AddUrlDialog, OptionsDialog, BatchDialog))
                    for w in self.root.winfo_children())
 
     # ---------------------------------------------------------- actions
@@ -971,6 +1193,7 @@ class App:
                           "They will be paused and can be resumed later. Exit?"):
             return
         self.mgr.shutdown()
+        self.bridge.stop()
         self.root.destroy()
 
     def run(self):
@@ -984,6 +1207,9 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except (AttributeError, OSError):
             pass
+    if bridge.ping_existing():
+        bridge.show_existing()   # already running: bring that window forward
+        return
     App().run()
 
 

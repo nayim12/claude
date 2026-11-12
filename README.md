@@ -17,6 +17,18 @@ A Windows download accelerator written in Python with Tkinter, using only the st
 - **Progress window:** shows speed, time left, resume capability and a live map of every connection.
 - **Main list:** sortable columns, filters (Unfinished, Finished, Queued), a right-click menu, Open, Open folder, Redownload and Properties.
 
+## Browser integration
+The `extension/` folder holds a browser extension for Chrome, Edge, Brave, Opera and Vivaldi (Manifest V3). It talks to SwiftGet through a local server on `127.0.0.1:9614`.
+
+- **Automatic capture:** when you click a file in the browser (zip, exe, mp4, pdf, iso and so on), the browser's own download stops and SwiftGet takes it over. SwiftGet receives the browser's **cookies, referrer and user agent**, so downloads that need a login still work.
+- **Right-click menu:** "Download with SwiftGet" on links, videos, audio and images, and "Download all links with SwiftGet" on pages and selections. The links open in a list where you tick the ones you want.
+- **Toolbar popup:** shows the connection status. You can turn capture on or off, capture every file type, ignore small files, skip certain extensions, or grab all links on the page.
+- **Fallback:** if SwiftGet isn't running, the browser downloads the file normally.
+- **Security:** the local server listens on the loopback address only, needs a custom header, and accepts only browser-extension origins. Ordinary websites can't send it downloads.
+
+**Install it in Chrome or Edge:** in SwiftGet, open **Browser** on the toolbar and click **Copy extension folder**. Open `chrome://extensions` or `edge://extensions`, turn on **Developer mode**, click **Load unpacked** and choose that folder.
+**Firefox:** go to `about:debugging` → *This Firefox* → *Load Temporary Add-on* and choose `swiftget-firefox.zip`. Firefox removes unsigned add-ons when it restarts. To keep it installed permanently, the add-on must be signed through addons.mozilla.org.
+
 ## Get the .exe
 Every push runs the **Build SwiftGet.exe** GitHub Actions workflow on `windows-latest`.
 Open the **Actions** tab, choose the latest run, and download the **SwiftGet-windows** artifact.
