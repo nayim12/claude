@@ -98,12 +98,10 @@ async function shouldCapture(item, s) {
   return FILE_EXTS.has(ext) || looksLikeFile(item.mime);
 }
 
-api.downloads.onCreated.addListener(async (item) => {
+// Try to hand a browser download to SwiftGet. Returns true if SwiftGet took it.
+async function takeOver(item) {
   const s = await settings();
-  if (!s.enabled || !(await shouldCapture(item, s))) return;
-
-  // hold the browser download while we ask SwiftGet to take it
-  try { await api.downloads.pause(item.id); } catch {}
+  if (!s.enabled || !(await shouldCapture(item, s))) return false;
   try {
     await sendOne({
       url: item.finalUrl || item.url,
@@ -112,15 +110,35 @@ api.downloads.onCreated.addListener(async (item) => {
       fileSize: item.totalBytes || item.fileSize || -1,
       mime: item.mime || "",
     });
-    try { await api.downloads.cancel(item.id); } catch {}
-    try { await api.downloads.erase({ id: item.id }); } catch {}
-    setBadge("");
-  } catch (e) {
-    // SwiftGet not running / disabled - let the browser finish the download
-    try { await api.downloads.resume(item.id); } catch {}
-    setBadge("off");
+  } catch {
+    setBadge("off");            // SwiftGet not running - browser keeps the download
+    return false;
   }
-});
+  try { await api.downloads.cancel(item.id); } catch {}
+  try { await api.downloads.erase({ id: item.id }); } catch {}
+  setBadge("");
+  return true;
+}
+
+if (api.downloads.onDeterminingFilename) {
+  // Chrome / Edge / Brave / Opera: this fires BEFORE the browser shows its own
+  // "Save As" window, so cancelling here means only SwiftGet's window appears.
+  api.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    takeOver(item)
+      .then((taken) => { if (!taken) suggest(); })
+      .catch(() => suggest());
+    return true;                 // we will call suggest() asynchronously
+  });
+} else {
+  // Firefox has no onDeterminingFilename: pause, hand over, cancel.
+  api.downloads.onCreated.addListener(async (item) => {
+    const s = await settings();
+    if (!s.enabled || !(await shouldCapture(item, s))) return;
+    try { await api.downloads.pause(item.id); } catch {}
+    const taken = await takeOver(item);
+    if (!taken) { try { await api.downloads.resume(item.id); } catch {} }
+  });
+}
 
 // ---------------------------------------------------------------- context menus
 function createMenus() {

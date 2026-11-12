@@ -69,6 +69,20 @@ def set_icon(win):
         pass
 
 
+def make_modal(win, tries=60):
+    """grab_set() fails with "window not viewable" if the dialog is not on
+    screen yet (e.g. the main window was minimized). Retry until it is
+    visible instead of crashing and leaving a half-built dialog behind."""
+    try:
+        if not win.winfo_exists():
+            return
+        win.grab_set()
+        win.focus_force()
+    except tk.TclError:
+        if tries > 0:
+            win.after(150, lambda: make_modal(win, tries - 1))
+
+
 def center(win, parent=None):
     win.update_idletasks()
     w, h = win.winfo_width(), win.winfo_height()
@@ -111,7 +125,7 @@ class AddUrlDialog(tk.Toplevel):
         self.bind("<Return>", lambda e: self.ok())
         self.bind("<Escape>", lambda e: self.destroy())
         center(self, app.root)
-        self.grab_set()
+        make_modal(self)
 
     def _clipboard_url(self):
         try:
@@ -186,7 +200,7 @@ class FileInfoDialog(tk.Toplevel):
         f.columnconfigure(1, weight=1)
         self.bind("<Escape>", lambda e: self.destroy())
         center(self, app.root)
-        self.grab_set()
+        make_modal(self)
 
         self._filename = self.suggested or os.path.basename(url.split("?")[0]) or "download"
         self._set_name(self._filename)
@@ -478,7 +492,7 @@ class OptionsDialog(tk.Toplevel):
         ttk.Button(bf, text="OK", style="Accent.TButton", command=self.ok).pack(side="right",
                                                                                 padx=6)
         center(self, app.root)
-        self.grab_set()
+        make_modal(self)
 
     def browse(self):
         p = filedialog.askdirectory(parent=self, initialdir=self.dir.get())
@@ -581,7 +595,7 @@ class BatchDialog(tk.Toplevel):
         ttk.Button(bf, text="Download", style="Accent.TButton",
                    command=lambda: self.go(True)).pack(side="right")
         center(self, app.root)
-        self.grab_set()
+        make_modal(self)
 
     def _toggle(self, e):
         iid = self.tree.identify_row(e.y) if e.type == tk.EventType.ButtonPress else \
@@ -705,6 +719,7 @@ class App:
             "browser_integration", True))
         self.bridge.start()
         self.progress_windows: dict[str, ProgressDialog] = {}
+        self._recent: dict[str, float] = {}
         self.filter = "All Downloads"
         self.sort_col, self.sort_rev = None, False
         self._last_clip = ""
@@ -967,21 +982,64 @@ class App:
 
     # ---------------------------------------------------------- browser
     def bring_to_front(self):
+        """Restore the window even if it is minimized or behind others."""
         r = self.root
-        r.deiconify()
-        r.lift()
-        r.attributes("-topmost", True)
-        r.after(300, lambda: r.attributes("-topmost", False))
-        r.focus_force()
+        try:
+            if r.state() in ("iconic", "withdrawn"):
+                r.state("normal")
+            r.deiconify()
+            if sys.platform == "win32":
+                import ctypes
+                hwnd = int(r.wm_frame(), 16)
+                user32 = ctypes.windll.user32
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+            r.lift()
+            r.attributes("-topmost", True)
+            r.after(300, lambda: r.attributes("-topmost", False))
+            r.focus_force()
+            # dialogs belonging to the window come back with it
+            for w in r.winfo_children():
+                if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                    w.deiconify()
+                    w.lift()
+        except (tk.TclError, AttributeError, OSError, ValueError):
+            pass
+
+    def _offer_once(self, url):
+        """True the first time a URL is offered; False if it was offered in the
+        last 20 s or is already being shown (stops duplicate pop-ups)."""
+        now = time.monotonic()
+        self._recent = {u: t for u, t in self._recent.items() if now - t < 20}
+        url = url.strip()
+        if url in self._recent:
+            return False
+        if any(isinstance(w, FileInfoDialog) and w.url == url
+               for w in self.root.winfo_children()):
+            return False
+        self._recent[url] = now
+        return True
 
     def _browser_events(self):
-        # one event per tick, and never while another modal dialog is open
-        if self._modal_open() or self.bridge.events.empty():
+        # "show" is always handled at once; new downloads wait until any
+        # open dialog is closed so they never stack on top of each other
+        q = self.bridge.events
+        pending = []
+        while not q.empty():
+            kind, data = q.get_nowait()
+            if kind == "show":
+                self.bring_to_front()
+            else:
+                pending.append((kind, data))
+        for ev in pending:
+            q.put(ev)
+        if self._modal_open() or not pending:
             return
-        kind, data = self.bridge.events.get_nowait()
-        if kind == "show":
-            self.bring_to_front()
-        elif kind == "add":
+        kind, data = q.get_nowait()
+        if kind == "add" and not self._offer_once(data["url"]):
+            return
+        if kind == "add":
             if self.mgr.settings.get("browser_show_dialog", True):
                 self.bring_to_front()
                 FileInfoDialog(self, data["url"], headers=data["headers"],
@@ -1014,9 +1072,9 @@ class App:
             return
         self._last_clip = t
         if engine.looks_like_download_url(t) and not self._modal_open():
-            if not any(d.url == t.strip() for d in self.mgr.downloads):
-                self.root.deiconify()
-                self.root.lift()
+            if not any(d.url == t.strip() for d in self.mgr.downloads) and \
+                    self._offer_once(t):
+                self.bring_to_front()
                 FileInfoDialog(self, t.strip())
 
     def _modal_open(self):
@@ -1098,7 +1156,7 @@ class App:
         ttk.Button(bf, text="Delete", style="Accent.TButton", command=ok).pack(side="right",
                                                                               padx=6)
         center(dlg, self.root)
-        dlg.grab_set()
+        make_modal(dlg)
 
     def delete_completed(self):
         if messagebox.askyesno(APP_NAME, "Remove all completed downloads from the list?\n"

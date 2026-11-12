@@ -194,6 +194,13 @@ def ping_existing(timeout=1.0):
 
 def show_existing():
     try:
+        import sys
+        if sys.platform == "win32":   # let the running instance take the foreground
+            import ctypes
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+    except (ImportError, AttributeError, OSError):
+        pass
+    try:
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}/show", data=b"{}",
                                      headers={"X-SwiftGet": "1",
                                               "Content-Type": "application/json"})
