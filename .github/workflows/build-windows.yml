@@ -1,0 +1,62 @@
+name: Build SwiftGet.exe
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller==6.11.1
+
+      - name: Package browser extension
+        run: python extension/build_extensions.py
+
+      - name: Build exe
+        working-directory: swiftget
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name SwiftGet
+          --icon icon.ico
+          --add-data "icon.ico;."
+          --add-data "icon.png;."
+          --add-data "../extension/dist/swiftget-chromium;browser-extension"
+          app.py
+
+      - name: Smoke-test engine
+        working-directory: swiftget
+        run: python -c "import engine, bridge; print(engine.human_size(123456789), bridge.PORT)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SwiftGet-windows
+          path: swiftget/dist/SwiftGet.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SwiftGet-browser-extension
+          path: |
+            extension/dist/swiftget-chromium.zip
+            extension/dist/swiftget-firefox.zip
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            swiftget/dist/SwiftGet.exe
+            extension/dist/swiftget-chromium.zip
+            extension/dist/swiftget-firefox.zip
