@@ -52,10 +52,19 @@ jobs:
             extension/dist/swiftget-chromium.zip
             extension/dist/swiftget-firefox.zip
 
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: SwiftGet ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            **SwiftGet.exe**: Windows download manager. Download it and run it; there is no installer.
+            **swiftget-chromium.zip**: browser extension for Chrome, Edge, Brave and Opera.
+            **swiftget-firefox.zip**: browser extension for Firefox (temporary add-on).
+
+            Windows SmartScreen may warn because the exe isn't code-signed: click **More info**, then **Run anyway**.
           files: |
             swiftget/dist/SwiftGet.exe
             extension/dist/swiftget-chromium.zip

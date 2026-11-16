@@ -32,7 +32,8 @@ The `extension/` folder holds a browser extension for Chrome, Edge, Brave, Opera
 ## Get the .exe
 Every push runs the **Build SwiftGet.exe** GitHub Actions workflow on `windows-latest`.
 Open the **Actions** tab, choose the latest run, and download the **SwiftGet-windows** artifact.
-Pushing a tag such as `v1.0.0` also attaches `SwiftGet.exe` to a GitHub Release.
+Each build is also published as a GitHub Release. The newest exe is always at
+https://github.com/nayim12/claude/releases/latest/download/SwiftGet.exe
 
 ## Build locally (Windows)
 ```bat
